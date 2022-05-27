@@ -964,6 +964,325 @@ static inline void store_with_remainders_i8(
   }
 }
 
+void transpose_contiguous_4x16_block(
+    const uint16_t* src,
+    uint16_t* dst,
+    int ld_src,
+    int nrem = 16) {
+  __m256i r[4];
+  __m512i u[2];
+  //load
+  if (nrem < 16) {
+    __mmask16 mask_mrem_v = (((long long)1) << nrem) - 1;
+    r[0] = _mm256_maskz_loadu_epi16(mask_mrem_v, src);
+    r[1] = _mm256_maskz_loadu_epi16(mask_mrem_v, src + ld_src);
+    r[2] = _mm256_maskz_loadu_epi16(mask_mrem_v, src + 2 * ld_src);
+    r[3] = _mm256_maskz_loadu_epi16(mask_mrem_v, src + 3 * ld_src);
+  } else {
+    r[0] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src));
+    r[1] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + ld_src));
+    r[2] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + 2 * ld_src));
+    r[3] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + 3 * ld_src));
+  }
+  // transpose
+  __m512i index = _mm512_set_epi32(
+      0x001f000f, 0x001e000e, 0x001d000d, 0x001c000c, 0x001b000b, 0x001a000a, 0x00190009, 0x00180008,
+      0x00170007, 0x00160006, 0x00150005, 0x00140004, 0x00130003, 0x00120002, 0x00110001, 0x00100000);
+  __m512i t0 = _mm512_inserti64x4(_mm512_castsi256_si512(r[0]), r[1], 0x01);
+  __m512i t1 = _mm512_inserti64x4(_mm512_castsi256_si512(r[2]), r[3], 0x01);
+
+  __m512i tt0 = _mm512_permutexvar_epi16(index, t0);
+  __m512i tt1 = _mm512_permutexvar_epi16(index, t1);
+  t0 = _mm512_unpacklo_epi32(tt0, tt1);
+  t1 = _mm512_unpackhi_epi32(tt0, tt1);
+
+  __m512i index1 = _mm512_set_epi32(
+      0x002f002e, 0x002d002c, 0x002b002a, 0x00290028, 0x000f000e, 0x000d000c, 0x000b000a, 0x00090008,
+      0x00270026, 0x00250024, 0x00230022, 0x00210020, 0x00070006, 0x00050004, 0x00030002, 0x00010000);
+  __m512i index2 = _mm512_set_epi32(
+      0x003f003e, 0x003d003c, 0x003b003a, 0x00390038, 0x001f001e, 0x001d001c, 0x001b001a, 0x00190018,
+      0x00370036, 0x00350034, 0x00330032, 0x00310030, 0x00170016, 0x00150014, 0x00130012, 0x00110010);
+  // merge values from two regs
+  u[0] = _mm512_permutex2var_epi16(t0, index1, t1);
+  u[1] = _mm512_permutex2var_epi16(t0, index2, t1);
+
+  // store
+  if (nrem < 8) {
+    // mask store
+    __mmask32 mask_rem_v = (((long long)1) << (nrem * 4)) - 1;
+    _mm512_mask_storeu_epi16(dst, mask_rem_v, u[0]);
+  } else if (nrem == 8) {
+    _mm512_storeu_si512(reinterpret_cast<__m512i*>(dst), u[0]);
+  } else if (nrem < 16) {
+    // mask store
+    __mmask32 mask_rem_v = (((long long)1) << ((nrem - 8) * 4)) - 1;
+    _mm512_storeu_si512(reinterpret_cast<__m512i*>(dst), u[0]);
+    _mm512_mask_storeu_epi16(dst + 32, mask_rem_v, u[1]);
+  } else {
+    _mm512_storeu_si512(reinterpret_cast<__m512i*>(dst), u[0]);
+    _mm512_storeu_si512(reinterpret_cast<__m512i*>(dst + 32), u[1]);
+  }
+}
+
+void transpose_contiguous_8x4_block(
+    const uint16_t* src,
+    uint16_t* dst,
+    int ld_dst,
+    int mrem = 8) {
+  __m512i r;
+  if (mrem < 8) {
+    __mmask32 mask_mrem_v = (((long long)1) << (mrem * 4)) - 1;
+    // mask load
+    r = _mm512_maskz_loadu_epi16(mask_mrem_v, src);
+  } else {
+    // normal load
+    r = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(src));
+  }
+  // transpose
+  __m512i index = _mm512_set_epi32(
+      0x001f001b, 0x00170013, 0x000f000b, 0x00070003, 0x001e001a, 0x000160012, 0x000e000a, 0x00060002,
+      0x001dd0019, 0x00150011, 0x000d0009, 0x00050001, 0x001c0018, 0x00140010, 0x000c0008, 0x00040000);
+
+  __m512i u = _mm512_permutexvar_epi16(index, r); // 0-- 1-- 2-- 3--
+  if (mrem < 8) {
+    // mask store
+    __mmask32 mask_rem_v = (((long long)1) << mrem) - 1;
+    _mm512_mask_storeu_epi16(
+        dst + 0 * ld_dst,
+        mask_rem_v,
+        _mm512_castsi128_si512(_mm512_extracti32x4_epi32(u, 0)));
+    _mm512_mask_storeu_epi16(
+        dst + ld_dst,
+        mask_rem_v,
+        _mm512_castsi128_si512(_mm512_extracti32x4_epi32(u, 1)));
+    _mm512_mask_storeu_epi16(
+        dst + 2 * ld_dst,
+        mask_rem_v,
+        _mm512_castsi128_si512(_mm512_extracti32x4_epi32(u, 2)));
+    _mm512_mask_storeu_epi16(
+        dst + 3 * ld_dst,
+        mask_rem_v,
+        _mm512_castsi128_si512(_mm512_extracti32x4_epi32(u, 3)));
+  } else {
+    // normal load
+    _mm_storeu_si128(
+        reinterpret_cast<__m128i*>(dst + 0 * ld_dst),
+        _mm512_extracti32x4_epi32(u, 0));
+    _mm_storeu_si128(
+        reinterpret_cast<__m128i*>(dst + 1 * ld_dst),
+        _mm512_extracti32x4_epi32(u, 1));
+    _mm_storeu_si128(
+        reinterpret_cast<__m128i*>(dst + 2 * ld_dst),
+        _mm512_extracti32x4_epi32(u, 2));
+    _mm_storeu_si128(
+        reinterpret_cast<__m128i*>(dst + 3 * ld_dst),
+        _mm512_extracti32x4_epi32(u, 3));
+  }
+    
+}
+
+void transpose_contiguous_2x16_block(
+    const float* src,
+    float* dst,
+    int ld_src,
+    int nrem = 16) {
+  __m512i r0, r1;
+  //load
+  if (nrem < 16) {
+    __mmask16 mask_mrem_v = (((long long)1) << nrem) - 1;
+    r0 = _mm512_maskz_loadu_epi32(mask_mrem_v, src);
+    r1 = _mm512_maskz_loadu_epi32(mask_mrem_v, src + ld_src);
+
+  } else {
+    r0 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(src));
+    r1 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(src + ld_src));
+  }
+  // transpose
+  __m512i index1 = _mm512_set_epi32(
+      0x0017, 0x0007, 0x0016, 0x0006, 0x0015, 0x0005, 0x0014, 0x0004,
+      0x0013, 0x0003, 0x0012, 0x0002, 0x0011, 0x0001, 0x0010, 0x0000);
+  __m512i index2 = _mm512_set_epi32(
+      0x001f, 0x000f, 0x001e, 0x000e, 0x001d, 0x000d, 0x001c, 0x000c,
+      0x001b, 0x000b, 0x001a, 0x000a, 0x0019, 0x0009, 0x0018, 0x0008);    
+  __m512i u0 = _mm512_permutex2var_epi32(r0, index1, r1);//a0 b0 a1 b1 a2 b2 a3 b3 a4 b4 a5 b5 a6 b6 a7 b7
+  __m512i u1 = _mm512_permutex2var_epi32(r0, index2, r1);//a8 b8 a9 b9 a10 b10 a11 b11 a12 b12 a13 b13 a14 b14 a15 b15
+  // store
+  if (nrem < 16) {
+    // mask store
+    if (nrem < 8){
+      __mmask16 mask_rem_v = (((long long)1) << (nrem * 2)) - 1;
+    _mm512_mask_storeu_epi32(dst, mask_rem_v, u0);
+    } else {
+      __mmask16 mask_rem_v = (((long long)1) << ((nrem - 8) * 2)) - 1;
+      _mm512_storeu_si512(reinterpret_cast<__m512i*>(dst), u0);
+      _mm512_mask_storeu_epi32(dst + 16, mask_rem_v, u1);
+    }
+    
+  } else {
+    // normal store
+    _mm512_storeu_si512(reinterpret_cast<__m512i*>(dst), u0);
+    _mm512_storeu_si512(reinterpret_cast<__m512i*>(dst + 16), u1);
+  }
+}
+
+void transpose_contiguous_2x32_block(
+    const uint8_t* src,
+    uint8_t* dst,
+    int ld_src,
+    int nrem = 16) {
+  __m256i r0, r1;
+  __m512i r;
+  //load
+  if (nrem < 16) {
+    // __mmask32 mask_mrem_v = (((long long)1) << nrem) - 1;
+    // r0 = _mm256_maskz_loadu_epi16(mask_mrem_v, src);
+    // r1 = _mm256_maskz_loadu_epi16(mask_mrem_v, src + ld_src);
+  } else {
+    // r0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src));
+    // r1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + ld_src));
+  }
+  // transpose
+  // r = _mm512_inserti64x4(_mm512_castsi256_si512(r0), r1, 0x01);
+  // __m512i index = _mm512_set_epi32(
+  //     0x001f000f, 0x001e000e, 0x001d000d, 0x001c000c, 0x001b000b, 0x001a000a, 0x00190009, 0x00180008,
+  //     0x00170007, 0x00160006, 0x00150005, 0x00140004, 0x00130003, 0x00120002, 0x00110001, 0x00100000);
+  // __m512i u = _mm512_permutexvar_epi16(index, r);
+
+  // store
+  if (nrem < 16) {
+    // mask store
+    // __mmask32 mask_rem_v = (((long long)1) << (nrem * 2)) - 1;
+    // _mm512_mask_storeu_epi16(dst, mask_rem_v, u);
+  } else {
+    // normal store
+    // _mm512_storeu_si512(reinterpret_cast<__m512i*>(dst), u);
+  }
+}
+
+void transpose_contiguous_2x16_block(
+    const uint16_t* src,
+    uint16_t* dst,
+    int ld_src,
+    int nrem = 16) {
+  __m256i r0, r1;
+  __m512i r;
+  //load
+  if (nrem < 16) {
+    __mmask32 mask_mrem_v = (((long long)1) << nrem) - 1;
+    r0 = _mm256_maskz_loadu_epi16(mask_mrem_v, src);
+    r1 = _mm256_maskz_loadu_epi16(mask_mrem_v, src + ld_src);
+  } else {
+    r0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src));
+    r1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + ld_src));
+  }
+  // transpose
+  r = _mm512_inserti64x4(_mm512_castsi256_si512(r0), r1, 0x01);
+  __m512i index = _mm512_set_epi32(
+      0x001f000f, 0x001e000e, 0x001d000d, 0x001c000c, 0x001b000b, 0x001a000a, 0x00190009, 0x00180008,
+      0x00170007, 0x00160006, 0x00150005, 0x00140004, 0x00130003, 0x00120002, 0x00110001, 0x00100000);
+  __m512i u = _mm512_permutexvar_epi16(index, r);
+
+  // store
+  if (nrem < 16) {
+    // mask store
+    __mmask32 mask_rem_v = (((long long)1) << (nrem * 2)) - 1;
+    _mm512_mask_storeu_epi16(dst, mask_rem_v, u);
+  } else {
+    // normal store
+    _mm512_storeu_si512(reinterpret_cast<__m512i*>(dst), u);
+  }
+}
+
+void transpose_contiguous_16x2_block(
+    const uint16_t* src,
+    uint16_t* dst,
+    int ld_dst,
+    int mrem = 16) {
+  __m512i r;
+  // load
+  if (mrem < 16) {
+    __mmask32 mask_mrem_v = (((long long)1) << (mrem * 2)) - 1;
+    // mask load
+    r = _mm512_maskz_loadu_epi16(mask_mrem_v, src);
+  }
+  else {
+    // normal load
+    r = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(src));
+  }
+  // transpose
+  __m512i index = _mm512_set_epi32(
+      0x001f001d, 0x001b0019, 0x00170015, 0x00130011, 0x000f000d, 0x000b0009, 0x00070005, 0x00030001,
+      0x001e001c, 0x001a0018, 0x00160014, 0x00120010, 0x000e000c, 0x000a0008, 0x00060004, 0x00020000);
+
+  __m512i u = _mm512_permutexvar_epi16(index, r); // 0-- 1--
+
+  // store
+  if (mrem < 16) {
+    __mmask32 mask_rem_v = (((long long)1) << mrem) - 1;
+    // mask store
+    _mm512_mask_storeu_epi16(
+        dst,
+        mask_rem_v,
+        _mm512_castsi256_si512(_mm512_extracti32x8_epi32(u, 0x0)));
+    _mm512_mask_storeu_epi16(
+        dst + ld_dst,
+        mask_rem_v,
+        _mm512_castsi256_si512(_mm512_extracti32x8_epi32(u, 0x1)));
+  } else {
+    // normal store
+    _mm256_storeu_si256(
+      reinterpret_cast<__m256i*>(dst),
+      _mm512_extracti32x8_epi32(u, 0x0));
+    _mm256_storeu_si256(
+      reinterpret_cast<__m256i*>(dst + ld_dst),
+      _mm512_extracti32x8_epi32(u, 0x01));
+  }
+  
+}
+
+// template <bool MREM = false, bool NREM = false>
+// void transpose_8x8_block(
+//     const uint16_t* src,
+//     int ld_src,
+//     uint16_t* dst,
+//     int ld_dst,
+//     int mrem = 8,
+//     int nrem = 8) {
+//     __m128i t[8];
+//     __m512i r[2];
+//   if (nrem < 8) {
+//     __mmask8 mask_nrem_v = (((long long)1) << nrem) - 1;
+//     for (int i = 0; i < mrem; ++i) {
+//       // mask load
+//       t[i] = _mm_maskz_loadu_epi16(mask_nrem_v, src + i * ld_src);
+//     }
+//   } else {
+//     for (int i = 0; i < mrem; ++i) {
+//       // normal load
+//       t[i] = _mm_loadu_epi16(src + i * ld_src);
+//     }
+//   }
+//   __m256i t0 = _mm256_inserti32x4(_mm256_castsi128_si256(t[0]), t[1], 1);
+//   __m256i t1 = _mm256_inserti32x4(_mm256_castsi128_si256(t[2]), t[3], 1);
+//   r[0] = _mm512_inserti64x4(_mm512_castsi256_si512(t0), t1, 1);
+
+//   t0 = _mm256_inserti32x4(_mm256_castsi128_si256(t[4]), t[5], 1);
+//   t1 = _mm256_inserti32x4(_mm256_castsi128_si256(t[6]), t[7], 1);
+//   r[1] = _mm512_inserti64x4(_mm512_castsi256_si512(t0), t1, 1);
+
+//   __m512i index1 = _mm512_set_epi32(
+//       0x002f002e, 0x002d002c, 0x002b002a, 0x00290028, 0x000f000e, 0x000d000c, 0x000b000a, 0x00090008,
+//       0x00270026, 0x00250024, 0x00230022, 0x00210020, 0x00070006, 0x00050004, 0x00030002, 0x00010000);
+//   __m512i index2 = _mm512_set_epi32(
+//       0x003f003e, 0x003d003c, 0x003b003a, 0x000b0003, 0x003a0032, 0x002a0022, 0x001a0012, 0x000a0002,
+//       0x00390031, 0x00290021, 0x00190011, 0x00090001, 0x00380030, 0x00280020, 0x00180010, 0x00080000);
+//   // merge values from two regs
+//   u[0] = _mm512_permutex2var_epi16(r[0], index1, r[1]);
+//   u[1] = _mm512_permutex2var_epi16(r[0], index2, r[1]);
+
+
+// }
+
 template <bool MREM = false, bool NREM = false>
 void transpose_16x16_block(
     const uint16_t* src,
@@ -1094,7 +1413,6 @@ void transpose_16x16_block(
       reinterpret_cast<__m256i*>(dst + 15 * ld_dst),
       _mm512_extracti32x8_epi32(u[7], 0x01));
   }
-}
 
 template <bool MREM = false, bool NREM = false>
 void transpose_16x32_block(
@@ -1298,6 +1616,72 @@ void transpose_16x32_block(
   }
 }
 
+void transpose_avx512_contiguous_thin(
+    const int64_t M,
+    const int64_t N,
+    const uint16_t* src,
+    unsigned ld_src,
+    uint16_t* dst,
+    unsigned ld_dst) {
+    if (N == 2) {
+      int i = 0;
+      for (; i < M / 16 * 16; i += 16) {
+        transpose_contiguous_16x2_block(
+            src + i * ld_src, dst + i, ld_dst);
+      }
+      int mrem = M - i;
+      if (mrem > 0) {
+        transpose_contiguous_16x2_block(
+            src + i * ld_src, dst + i, ld_dst, mrem);
+      }
+    } else if (N == 4) {
+      int i = 0;
+      for (; i < M / 8 * 8; i += 8) {
+        transpose_contiguous_8x4_block(
+            src + i * ld_src, dst + i, ld_dst);
+      }
+      int mrem = M - i;
+      if (mrem > 0) {
+        transpose_contiguous_8x4_block(
+            src + i * ld_src, dst + i, ld_dst, mrem);
+      }
+    }
+
+}
+
+void transpose_avx512_contiguous_wide(
+    const int64_t M,
+    const int64_t N,
+    const uint16_t* src,
+    unsigned ld_src,
+    uint16_t* dst,
+    unsigned ld_dst) {
+    if (M == 2) {
+      int i = 0;
+      for (; i < N / 16 * 16; i += 16) {
+        transpose_contiguous_2x16_block(
+            src + i, dst + i * ld_dst, ld_src);
+      }
+      int nrem = N - i;
+      if (nrem > 0) {
+        transpose_contiguous_2x16_block(
+            src + i, dst + i * ld_dst, ld_src, nrem);
+      }
+    } else if (M == 4) {
+      int i = 0;
+      for (; i < N / 16 * 16; i += 16) {
+        transpose_contiguous_4x16_block(
+            src + i, dst + i * ld_dst, ld_src);
+      }
+      int nrem = N - i;
+      if (nrem > 0) {
+        transpose_contiguous_4x16_block(
+            src + i, dst + i * ld_dst, ld_src, nrem);
+      }
+    }
+
+}
+
 template <>
 void transpose_avx512(
     const int64_t M,
@@ -1306,34 +1690,79 @@ void transpose_avx512(
     unsigned ld_src,
     uint16_t* dst,
     unsigned ld_dst) {
-  int i = 0;
-  for (; i < M / 16 * 16; i += 16) {
-    int j = 0;
-    for (; j < N / 16 * 16; j += 16) {
-      transpose_16x16_block<false, false>(
-          src + i * ld_src + j, ld_src, dst + j * ld_dst + i, ld_dst);
+  // contiguous
+  if (M == ld_dst && (M == 2 || M == 4)) {
+    transpose_avx512_contiguous_wide(M, N, src, ld_src, dst, ld_dst);
+  } else if (N == ld_src && (N == 2 || N == 4)) {
+    transpose_avx512_contiguous_thin(M, N, src, ld_src, dst, ld_dst);
+  } else {
+    int i = 0;
+    for (; i < M / 16 * 16; i += 16) {
+      int j = 0;
+      for (; j < N / 16 * 16; j += 16) {
+        transpose_16x16_block<false, false>(
+            src + i * ld_src + j, ld_src, dst + j * ld_dst + i, ld_dst);
+      }
+      // handle j rem
+      int nrem = N - j;
+      if (nrem > 0) {
+        transpose_16x16_block<false, true>(
+            src + i * ld_src + j, ld_src, dst + j * ld_dst + i, ld_dst, 16, nrem);
+      }
     }
-    // handle j rem
-    int nrem = N - j;
-    if (nrem > 0) {
-      transpose_16x16_block<false, true>(
-          src + i * ld_src + j, ld_src, dst + j * ld_dst + i, ld_dst, 16, nrem);
+    // handle i rem
+    int mrem = M - i;
+    if (mrem > 0) {
+      int j = 0;
+      for (; j < N / 16 * 16; j += 16) {
+        transpose_16x16_block<true, false>(
+            src + i * ld_src + j, ld_src, dst + j * ld_dst + i, ld_dst, mrem, 16);
+      }
+      // handle j rem
+      int nrem = N - j;
+      transpose_16x16_block<true, true>(
+          src + i * ld_src + j, ld_src, dst + j * ld_dst + i, ld_dst, mrem, nrem);
     }
   }
-  // handle i rem
-  int mrem = M - i;
-  if (mrem > 0) {
-    int j = 0;
-    for (; j < N / 16 * 16; j += 16) {
-      transpose_16x16_block<true, false>(
-          src + i * ld_src + j, ld_src, dst + j * ld_dst + i, ld_dst, mrem, 16);
-    }
-    // handle j rem
-    int nrem = N - j;
-    transpose_16x16_block<true, true>(
-        src + i * ld_src + j, ld_src, dst + j * ld_dst + i, ld_dst, mrem, nrem);
-  }
+
 }
+
+// template <>
+// void transpose_avx512(
+//     const int64_t M,
+//     const int64_t N,
+//     const uint16_t* src,
+//     unsigned ld_src,
+//     uint16_t* dst,
+//     unsigned ld_dst) {
+//   int i = 0;
+//   for (; i < M / 16 * 16; i += 16) {
+//     int j = 0;
+//     for (; j < N / 16 * 16; j += 16) {
+//       transpose_16x16_block<false, false>(
+//           src + i * ld_src + j, ld_src, dst + j * ld_dst + i, ld_dst);
+//     }
+//     // handle j rem
+//     int nrem = N - j;
+//     if (nrem > 0) {
+//       transpose_16x16_block<false, true>(
+//           src + i * ld_src + j, ld_src, dst + j * ld_dst + i, ld_dst, 16, nrem);
+//     }
+//   }
+//   // handle i rem
+//   int mrem = M - i;
+//   if (mrem > 0) {
+//     int j = 0;
+//     for (; j < N / 16 * 16; j += 16) {
+//       transpose_16x16_block<true, false>(
+//           src + i * ld_src + j, ld_src, dst + j * ld_dst + i, ld_dst, mrem, 16);
+//     }
+//     // handle j rem
+//     int nrem = N - j;
+//     transpose_16x16_block<true, true>(
+//         src + i * ld_src + j, ld_src, dst + j * ld_dst + i, ld_dst, mrem, nrem);
+//   }
+// }
 
 template <>
 void transpose_avx512(
